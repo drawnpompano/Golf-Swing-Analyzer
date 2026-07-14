@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Golf Swing Analyzer</title>
+<meta name="description" content="Capture or upload slow-motion golf swing video, draw lines and angles, and step frame-by-frame to break down your swing.">
+<meta name="theme-color" content="#0d2b22">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Swing">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="app-header">
+    <button id="btn-back" class="icon-btn hidden" aria-label="Back to library">&larr;</button>
+    <h1 id="header-title">Swing Analyzer</h1>
+    <button id="btn-install" class="icon-btn hidden" aria-label="Install app" title="Install app">&#8681;</button>
+  </header>
+
+  <main>
+    <!-- LIBRARY VIEW -->
+    <section id="view-library" class="view active">
+      <div class="capture-actions">
+        <button id="btn-upload" class="primary-btn">
+          <span class="btn-icon">&#128193;</span> Upload Video
+        </button>
+        <button id="btn-record" class="primary-btn secondary">
+          <span class="btn-icon">&#128247;</span> Record Video
+        </button>
+      </div>
+      <p class="hint">Tip: for true slow-motion footage, record with your phone's native <strong>Slo-Mo</strong> camera mode, then upload that clip here.</p>
+
+      <div id="library-empty" class="empty-state">
+        <p>No swings saved yet.</p>
+        <p class="muted">Upload or record a swing to start analyzing.</p>
+      </div>
+
+      <ul id="library-grid" class="library-grid"></ul>
+    </section>
+
+    <!-- LIVE RECORD VIEW -->
+    <section id="view-record" class="view">
+      <div class="record-stage">
+        <video id="record-preview" autoplay muted playsinline></video>
+        <div id="record-timer" class="record-timer hidden">00:00</div>
+      </div>
+      <p class="hint">This records at your device's normal speed (the web cannot trigger hardware slo-mo). For real slow motion, use Upload with a clip from your camera app's Slo-Mo mode.</p>
+      <div class="record-controls">
+        <button id="btn-record-toggle" class="primary-btn danger">&#9679; Start Recording</button>
+        <button id="btn-record-cancel" class="ghost-btn">Cancel</button>
+      </div>
+    </section>
+
+    <!-- ANALYZER VIEW -->
+    <section id="view-analyzer" class="view">
+      <div class="stage-wrap">
+        <div id="video-stage" class="video-stage">
+          <video id="player" playsinline></video>
+          <canvas id="overlay"></canvas>
+        </div>
+      </div>
+
+      <div class="scrub-row">
+        <span id="time-current" class="time-label">0:00.0</span>
+        <input id="scrubber" type="range" min="0" max="1000" value="0" step="1">
+        <span id="time-total" class="time-label">0:00.0</span>
+      </div>
+
+      <div class="transport-row">
+        <button id="btn-step-back" class="icon-btn" title="Previous frame">&#9198;</button>
+        <button id="btn-play" class="icon-btn play-btn" title="Play / Pause">&#9654;</button>
+        <button id="btn-step-fwd" class="icon-btn" title="Next frame">&#9197;</button>
+
+        <label class="field">
+          <span>Speed</span>
+          <select id="speed-select">
+            <option value="0.1">0.1&times;</option>
+            <option value="0.25">0.25&times;</option>
+            <option value="0.5" selected>0.5&times;</option>
+            <option value="1">1&times;</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>FPS</span>
+          <select id="fps-select" title="Source frame rate, used for frame stepping">
+            <option value="24">24</option>
+            <option value="30" selected>30</option>
+            <option value="60">60</option>
+            <option value="120">120</option>
+            <option value="240">240</option>
+          </select>
+        </label>
+
+        <button id="btn-guide" class="icon-btn toggle-btn" title="Toggle alignment guide">&#8862;</button>
+      </div>
+
+      <div class="toolbar">
+        <div class="tool-group" role="group" aria-label="Drawing tools">
+          <button class="tool-btn active" data-tool="pointer" title="Pointer (no drawing)">&#8598;</button>
+          <button class="tool-btn" data-tool="freehand" title="Freehand">&#9998;</button>
+          <button class="tool-btn" data-tool="line" title="Straight line">&#9585;</button>
+          <button class="tool-btn" data-tool="angle" title="Angle (two segments + degree readout)">&#9701;</button>
+          <button class="tool-btn" data-tool="circle" title="Circle marker">&#9675;</button>
+          <button class="tool-btn" data-tool="arrow" title="Arrow">&#8599;</button>
+        </div>
+
+        <div class="tool-group swatches" role="group" aria-label="Color">
+          <button class="swatch active" data-color="#ff3b30" style="--c:#ff3b30"></button>
+          <button class="swatch" data-color="#ffd60a" style="--c:#ffd60a"></button>
+          <button class="swatch" data-color="#30d158" style="--c:#30d158"></button>
+          <button class="swatch" data-color="#0a84ff" style="--c:#0a84ff"></button>
+          <button class="swatch" data-color="#ffffff" style="--c:#ffffff"></button>
+        </div>
+
+        <label class="field width-field">
+          <span>Width</span>
+          <input id="stroke-width" type="range" min="2" max="12" value="4">
+        </label>
+
+        <div class="tool-group">
+          <button id="btn-undo" class="icon-btn" title="Undo last shape">&#8617;</button>
+          <button id="btn-clear-frame" class="icon-btn" title="Clear this frame's drawing">&#10005;</button>
+        </div>
+      </div>
+
+      <div class="session-row">
+        <input id="session-name" type="text" placeholder="Swing name" maxlength="60">
+        <button id="btn-snapshot" class="ghost-btn" title="Save annotated frame as image">&#128247; Snapshot</button>
+        <button id="btn-delete-session" class="ghost-btn danger-text" title="Delete this swing">Delete</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <dialog id="confirm-dialog">
+    <p id="confirm-message">Are you sure?</p>
+    <div class="dialog-actions">
+      <button id="confirm-cancel" class="ghost-btn">Cancel</button>
+      <button id="confirm-ok" class="primary-btn danger">Delete</button>
+    </div>
+  </dialog>
+
+  <input type="file" id="file-input" accept="video/*" class="hidden">
+</div>
+
+<script src="js/db.js"></script>
+<script src="js/canvas-tools.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

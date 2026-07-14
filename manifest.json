@@ -1,0 +1,17 @@
+{
+  "name": "Golf Swing Analyzer",
+  "short_name": "Swing",
+  "description": "Capture or upload slow-motion golf swing video, draw lines and angles, and step frame-by-frame to break down your swing.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d2b22",
+  "theme_color": "#0d2b22",
+  "categories": ["sports", "utilities"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
