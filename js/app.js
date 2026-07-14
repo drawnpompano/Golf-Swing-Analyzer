@@ -106,18 +106,27 @@
       const v = document.createElement('video');
       v.muted = true;
       v.playsInline = true;
+      v.preload = 'metadata';
+      // Some mobile browsers won't decode/seek a video element that isn't
+      // attached to the document, so keep it in the DOM (just invisible).
+      v.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;top:0;left:0;';
+      document.body.appendChild(v);
       const url = URL.createObjectURL(blob);
       v.src = url;
 
+      let settled = false;
       const finish = (dataURL) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
         URL.revokeObjectURL(url);
+        v.remove();
         resolve(dataURL);
       };
+      // Never let a stalled/undecodable video hang the upload flow forever.
+      const timeoutId = setTimeout(() => finish(null), 5000);
 
-      v.addEventListener('loadedmetadata', () => {
-        v.currentTime = Math.min(0.4 * (v.duration || 1), 1);
-      });
-      v.addEventListener('seeked', () => {
+      const captureFrame = () => {
         try {
           const c = document.createElement('canvas');
           const scale = 300 / (v.videoWidth || 300);
@@ -129,7 +138,14 @@
         } catch (err) {
           finish(null);
         }
+      };
+
+      v.addEventListener('loadedmetadata', () => {
+        const target = Math.min(0.4 * (v.duration || 0), 1);
+        if (target > 0) v.currentTime = target;
+        else captureFrame(); // seeking to 0 may never fire 'seeked'
       });
+      v.addEventListener('seeked', captureFrame);
       v.addEventListener('error', () => finish(null));
     });
   }
@@ -182,13 +198,18 @@
     els.fileInput.value = '';
     if (!file) return;
     showToast('Loading video…');
-    const thumbnail = await generateThumbnail(file);
-    const session = await SwingDB.createSession({
-      videoBlob: file,
-      thumbnail,
-      name: file.name.replace(/\.[^/.]+$/, '')
-    });
-    openSession(session.id);
+    try {
+      const thumbnail = await generateThumbnail(file);
+      const session = await SwingDB.createSession({
+        videoBlob: file,
+        thumbnail,
+        name: file.name.replace(/\.[^/.]+$/, '')
+      });
+      openSession(session.id);
+    } catch (err) {
+      console.error('Upload failed', err);
+      showToast('Could not save that video (' + (err && err.message ? err.message : 'unknown error') + ')', 4000);
+    }
   });
 
   // ---- Record flow ----
@@ -242,9 +263,15 @@
       stopRecordStream();
       if (blob.size === 0) { showView('library'); return; }
       showToast('Saving recording…');
-      const thumbnail = await generateThumbnail(blob);
-      const session = await SwingDB.createSession({ videoBlob: blob, thumbnail });
-      openSession(session.id);
+      try {
+        const thumbnail = await generateThumbnail(blob);
+        const session = await SwingDB.createSession({ videoBlob: blob, thumbnail });
+        openSession(session.id);
+      } catch (err) {
+        console.error('Saving recording failed', err);
+        showToast('Could not save recording (' + (err && err.message ? err.message : 'unknown error') + ')', 4000);
+        showView('library');
+      }
     });
     mediaRecorder.start();
     recordSeconds = 0;
