@@ -1,6 +1,8 @@
 (() => {
   'use strict';
 
+  const APP_VERSION = '1.2.0';
+
   // ---- DOM refs ----
   const els = {
     headerTitle: document.getElementById('header-title'),
@@ -47,6 +49,8 @@
     btnSnapshot: document.getElementById('btn-snapshot'),
     btnDeleteSession: document.getElementById('btn-delete-session'),
 
+    appVersion: document.getElementById('app-version'),
+
     toast: document.getElementById('toast'),
     confirmDialog: document.getElementById('confirm-dialog'),
     confirmMessage: document.getElementById('confirm-message'),
@@ -83,6 +87,18 @@
 
   function frameIndexForTime(t, fps) {
     return Math.round(t * fps);
+  }
+
+  // Guards against IndexedDB hangs (e.g. a blocked upgrade, or a very large
+  // blob stalling structured clone) so storage issues can never freeze the UI.
+  function withTimeout(promise, ms, message) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(message || `Timed out after ${ms}ms`)), ms);
+      promise.then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); reject(e); }
+      );
+    });
   }
 
   function confirmAction(message) {
@@ -193,23 +209,11 @@
 
   // ---- Upload flow ----
   els.btnUpload.addEventListener('click', () => els.fileInput.click());
-  els.fileInput.addEventListener('change', async () => {
+  els.fileInput.addEventListener('change', () => {
     const file = els.fileInput.files[0];
     els.fileInput.value = '';
     if (!file) return;
-    showToast('Loading video…');
-    try {
-      const thumbnail = await generateThumbnail(file);
-      const session = await SwingDB.createSession({
-        videoBlob: file,
-        thumbnail,
-        name: file.name.replace(/\.[^/.]+$/, '')
-      });
-      openSession(session.id);
-    } catch (err) {
-      console.error('Upload failed', err);
-      showToast('Could not save that video (' + (err && err.message ? err.message : 'unknown error') + ')', 4000);
-    }
+    loadNewVideo(file, file.name.replace(/\.[^/.]+$/, ''));
   });
 
   // ---- Record flow ----
@@ -258,20 +262,11 @@
     mediaRecorder.addEventListener('dataavailable', (e) => {
       if (e.data && e.data.size > 0) recordedChunks.push(e.data);
     });
-    mediaRecorder.addEventListener('stop', async () => {
+    mediaRecorder.addEventListener('stop', () => {
       const blob = new Blob(recordedChunks, { type: mimeType || 'video/webm' });
       stopRecordStream();
       if (blob.size === 0) { showView('library'); return; }
-      showToast('Saving recording…');
-      try {
-        const thumbnail = await generateThumbnail(blob);
-        const session = await SwingDB.createSession({ videoBlob: blob, thumbnail });
-        openSession(session.id);
-      } catch (err) {
-        console.error('Saving recording failed', err);
-        showToast('Could not save recording (' + (err && err.message ? err.message : 'unknown error') + ')', 4000);
-        showView('library');
-      }
+      loadNewVideo(blob);
     });
     mediaRecorder.start();
     recordSeconds = 0;
@@ -304,15 +299,26 @@
   function scheduleSave() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      if (!currentSession) return;
-      SwingDB.updateSession(currentSession.id, { annotations: currentSession.annotations, fps: currentSession.fps, name: currentSession.name });
+      // Not persisted yet (background save from loadNewVideo still in flight,
+      // or it failed) — persistNewSession flushes annotations once it lands.
+      if (!currentSession || !currentSession.id) return;
+      SwingDB.updateSession(currentSession.id, { annotations: currentSession.annotations, fps: currentSession.fps, name: currentSession.name })
+        .catch((err) => console.error('autosave failed', err));
     }, 500);
   }
 
   async function flushSave() {
     clearTimeout(saveTimer);
-    if (!currentSession) return;
-    await SwingDB.updateSession(currentSession.id, { annotations: currentSession.annotations, fps: currentSession.fps, name: currentSession.name });
+    if (!currentSession || !currentSession.id) return;
+    try {
+      await withTimeout(
+        SwingDB.updateSession(currentSession.id, { annotations: currentSession.annotations, fps: currentSession.fps, name: currentSession.name }),
+        4000,
+        'Save timed out'
+      );
+    } catch (err) {
+      console.error('flushSave failed', err);
+    }
   }
 
   function onAnnotationChange(shapes) {
@@ -323,19 +329,12 @@
     scheduleSave();
   }
 
-  async function openSession(id) {
-    currentSession = await SwingDB.getSession(id);
-    if (!currentSession) { showToast('Could not open swing'); return; }
-
+  // Points the <video> at a blob and wires up duration/canvas sync once
+  // metadata is available. Shared by opening a saved session and loading a
+  // brand new upload/recording.
+  function attachVideoToPlayer(blob) {
     if (currentVideoURL) URL.revokeObjectURL(currentVideoURL);
-    currentVideoURL = URL.createObjectURL(currentSession.videoBlob);
-    els.fpsSelect.value = String(currentSession.fps || 30);
-    els.sessionName.value = currentSession.name;
-    els.speedSelect.value = '0.5';
-    els.player.playbackRate = 0.5;
-    setPlayIcon(false);
-
-    showView('analyzer');
+    currentVideoURL = URL.createObjectURL(blob);
 
     function onMeta() {
       els.player.removeEventListener('loadedmetadata', onMeta);
@@ -350,6 +349,82 @@
     els.player.src = currentVideoURL;
     els.player.pause();
     if (els.player.readyState >= 1) onMeta();
+  }
+
+  async function openSession(id) {
+    const session = await SwingDB.getSession(id);
+    if (!session) { showToast('Could not open swing'); return; }
+    currentSession = session;
+
+    els.fpsSelect.value = String(currentSession.fps || 30);
+    els.sessionName.value = currentSession.name;
+    els.speedSelect.value = '0.5';
+    els.player.playbackRate = 0.5;
+    setPlayIcon(false);
+
+    showView('analyzer');
+    attachVideoToPlayer(currentSession.videoBlob);
+  }
+
+  // Shows the video immediately (no DB round-trip on the critical path) and
+  // saves it to the library in the background. This way a slow, hung, or
+  // failing IndexedDB write (large slo-mo files can be very large, and some
+  // mobile browsers are unreliable storing big blobs) can never make an
+  // upload look like it silently did nothing.
+  function loadNewVideo(blob, name) {
+    const session = {
+      id: null,
+      name: name || `Swing ${new Date().toLocaleDateString()}`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      fps: 30,
+      videoBlob: blob,
+      thumbnail: null,
+      annotations: {}
+    };
+    currentSession = session;
+
+    els.fpsSelect.value = '30';
+    els.sessionName.value = session.name;
+    els.speedSelect.value = '0.5';
+    els.player.playbackRate = 0.5;
+    setPlayIcon(false);
+
+    showView('analyzer');
+    attachVideoToPlayer(blob);
+
+    persistNewSession(session, blob);
+  }
+
+  async function persistNewSession(session, blob) {
+    try {
+      const thumbnail = await generateThumbnail(blob); // always resolves (null on failure/timeout)
+      if (currentSession !== session) return; // user moved on before this landed
+
+      const created = await withTimeout(
+        SwingDB.createSession({ videoBlob: blob, thumbnail, name: session.name, fps: session.fps }),
+        8000,
+        'Saving to library timed out'
+      );
+
+      if (currentSession !== session) {
+        // User deleted / navigated away while this was saving in the
+        // background — drop the now-orphaned row instead of leaving a
+        // ghost entry in the library.
+        SwingDB.deleteSession(created.id).catch(() => {});
+        return;
+      }
+      session.id = created.id;
+      // Flush any annotations drawn while the save was still in flight.
+      await withTimeout(
+        SwingDB.updateSession(created.id, { annotations: session.annotations, fps: session.fps, name: session.name }),
+        4000,
+        'Save timed out'
+      );
+    } catch (err) {
+      console.error('Could not save swing to library', err);
+      showToast("Video loaded, but couldn't be saved to your library (" + (err && err.message ? err.message : 'storage error') + ')', 4500);
+    }
   }
 
   function setPlayIcon(playing) {
@@ -467,8 +542,16 @@
     if (!currentSession) return;
     const ok = await confirmAction(`Delete "${currentSession.name}"? This cannot be undone.`);
     if (!ok) return;
-    await SwingDB.deleteSession(currentSession.id);
-    currentSession = null;
+    const toDelete = currentSession;
+    currentSession = null; // also signals any in-flight background save to abort
+    if (toDelete.id) {
+      try {
+        await withTimeout(SwingDB.deleteSession(toDelete.id), 4000, 'Delete timed out');
+      } catch (err) {
+        console.error('Delete failed', err);
+        showToast('Could not delete (storage error)');
+      }
+    }
     showView('library');
     renderLibrary();
   });
@@ -512,9 +595,21 @@
   // ---- Init ----
   function init() {
     annotator = new AnnotationCanvas(els.overlay, { onChange: onAnnotationChange });
+    if (els.appVersion) els.appVersion.textContent = `v${APP_VERSION}`;
+
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('sw.js').catch(() => {});
+      });
+      // A new service worker version takes control right after activating
+      // (see sw.js skipWaiting/clients.claim) — reload once so the page
+      // actually picks up the fresh HTML/JS/CSS instead of staying on
+      // whatever was cached when this tab was first opened.
+      let refreshingForUpdate = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (refreshingForUpdate) return;
+        refreshingForUpdate = true;
+        flushSave().finally(() => window.location.reload());
       });
     }
     showView('library');
