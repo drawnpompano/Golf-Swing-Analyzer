@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.3.0';
+  const APP_VERSION = '1.4.0';
 
   // ---- DOM refs ----
   const els = {
@@ -70,12 +70,12 @@
   let recordInterval = null;
   let deferredInstallEvent = null;
 
-  // The authoritative "which frame am I on" pointer. Annotations are looked
-  // up and stored against this integer, NOT recomputed from video.currentTime
-  // on every step — browser seeks don't always land exactly on the
-  // requested time (frame-rate mismatches, seek snapping), so re-deriving
-  // the frame from currentTime after every step/pause let tiny drift shift
-  // the lookup key and made previously-drawn annotations "disappear".
+  // The authoritative "which frame am I on" pointer, driven directly by
+  // stepping/scrubbing rather than recomputed from video.currentTime after
+  // every seek (browser seeks don't always land exactly on the requested
+  // time). Used for frame-accurate stepping/scrubber display only —
+  // drawings are a single persistent layer for the whole clip, not tied to
+  // a particular frame (see currentSession.annotations).
   let currentFrameIndex = 0;
 
   // ---- Utilities ----
@@ -297,14 +297,21 @@
   function syncCanvasSize() {
     const rect = els.player.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
-      annotator.resize(rect.width, rect.height);
-      loadAnnotationsForCurrentFrame();
+      annotator.resize(rect.width, rect.height); // preserves existing shapes
     }
   }
 
-  function loadAnnotationsForCurrentFrame() {
-    if (!currentSession) return;
-    annotator.loadShapes(currentSession.annotations[String(currentFrameIndex)] || []);
+  // Drawings are a single persistent layer for the whole clip (not tied to
+  // a frame), so they're loaded once when a video is attached rather than
+  // re-fetched on every pause/seek/step.
+  function normalizeAnnotations(annotations) {
+    if (Array.isArray(annotations)) return annotations;
+    if (annotations && typeof annotations === 'object') {
+      // Migrate sessions saved by an earlier per-frame version: merge every
+      // frame's shapes into one persistent layer instead of losing them.
+      return Object.values(annotations).flat();
+    }
+    return [];
   }
 
   function scheduleSave() {
@@ -334,8 +341,7 @@
 
   function onAnnotationChange(shapes) {
     if (!currentSession) return;
-    if (shapes.length) currentSession.annotations[String(currentFrameIndex)] = shapes;
-    else delete currentSession.annotations[String(currentFrameIndex)];
+    currentSession.annotations = shapes;
     scheduleSave();
   }
 
@@ -354,6 +360,10 @@
       els.scrubber.value = '0';
       els.timeTotal.textContent = formatTime(els.player.duration || 0);
       els.timeCurrent.textContent = formatTime(0);
+      if (currentSession) {
+        currentSession.annotations = normalizeAnnotations(currentSession.annotations);
+        annotator.loadShapes(currentSession.annotations);
+      }
       requestAnimationFrame(() => requestAnimationFrame(syncCanvasSize));
     }
     // Attach before assigning src: a fresh recording's blob can report
@@ -394,7 +404,7 @@
       fps: 30,
       videoBlob: blob,
       thumbnail: null,
-      annotations: {}
+      annotations: []
     };
     currentSession = session;
 
@@ -466,13 +476,11 @@
       currentFrameIndex = Math.min(Math.round(els.player.currentTime * fps), totalFrames());
     }
     els.scrubber.value = String(currentFrameIndex);
-    loadAnnotationsForCurrentFrame();
   });
   els.player.addEventListener('seeked', () => {
     els.timeCurrent.textContent = formatTime(els.player.currentTime);
     if (els.player.paused) {
       els.scrubber.value = String(currentFrameIndex);
-      loadAnnotationsForCurrentFrame();
     }
   });
   els.player.addEventListener('timeupdate', () => {
@@ -524,7 +532,6 @@
     els.scrubber.max = String(totalFrames());
     els.scrubber.value = String(currentFrameIndex);
     scheduleSave();
-    loadAnnotationsForCurrentFrame();
   });
 
   els.btnGuide.addEventListener('click', () => {

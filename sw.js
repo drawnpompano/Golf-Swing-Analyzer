@@ -1,7 +1,7 @@
 // Bump this on every release so the browser detects sw.js changed (byte
 // diff triggers the update flow) and purges the old cache. Keep in sync
 // with APP_VERSION in js/app.js.
-const CACHE_VERSION = 'swing-analyzer-v1.3.0';
+const CACHE_VERSION = 'swing-analyzer-v1.4.0';
 const APP_SHELL = [
   './',
   './index.html',

@@ -7,7 +7,7 @@ A installable, offline-capable PWA for breaking down your golf swing on video. U
 - **Upload or record**: pick a video from your camera roll, or record directly in the browser.
 - **Frame-by-frame stepping**: step forward/back by a single frame (using a configurable source frame rate), scrub with a precise timeline, and play back at 0.1x–1x speed.
 - **Drawing tools**: freehand, straight line, arrow, circle marker, and a two-line **angle** tool that computes and labels the angle in degrees (e.g. for spine angle or swing plane).
-- **Per-frame annotations**: drawings are tied to the frame they were made on, so stepping through the swing shows the right markup at each position. A toggleable crosshair guide helps with posture alignment.
+- **Persistent annotations**: drawings stay on screen as you step or scrub through the whole clip, so you can draw a reference line (e.g. spine angle at address) and compare it against later frames. A toggleable crosshair guide helps with posture alignment. Use Undo or Clear to remove drawings.
 - **Snapshot export**: save the current frame plus your annotations as a full-resolution PNG.
 - **Local library**: swings are saved on-device (IndexedDB) with a thumbnail, so you can revisit and keep annotating later. Nothing is uploaded anywhere.
 - **Installable & offline**: add it to your home screen; the app shell is cached by a service worker so it opens without a network connection.
