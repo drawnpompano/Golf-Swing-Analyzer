@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.2.0';
+  const APP_VERSION = '1.3.0';
 
   // ---- DOM refs ----
   const els = {
@@ -70,6 +70,14 @@
   let recordInterval = null;
   let deferredInstallEvent = null;
 
+  // The authoritative "which frame am I on" pointer. Annotations are looked
+  // up and stored against this integer, NOT recomputed from video.currentTime
+  // on every step — browser seeks don't always land exactly on the
+  // requested time (frame-rate mismatches, seek snapping), so re-deriving
+  // the frame from currentTime after every step/pause let tiny drift shift
+  // the lookup key and made previously-drawn annotations "disappear".
+  let currentFrameIndex = 0;
+
   // ---- Utilities ----
   function showToast(msg, duration = 2200) {
     els.toast.textContent = msg;
@@ -85,8 +93,12 @@
     return `${m}:${s}`;
   }
 
-  function frameIndexForTime(t, fps) {
-    return Math.round(t * fps);
+  function currentFps() {
+    return Number(els.fpsSelect.value) || 30;
+  }
+
+  function totalFrames() {
+    return Math.max(0, Math.round((els.player.duration || 0) * currentFps()));
   }
 
   // Guards against IndexedDB hangs (e.g. a blocked upgrade, or a very large
@@ -292,8 +304,7 @@
 
   function loadAnnotationsForCurrentFrame() {
     if (!currentSession) return;
-    const idx = frameIndexForTime(els.player.currentTime, currentSession.fps);
-    annotator.loadShapes(currentSession.annotations[String(idx)] || []);
+    annotator.loadShapes(currentSession.annotations[String(currentFrameIndex)] || []);
   }
 
   function scheduleSave() {
@@ -323,9 +334,8 @@
 
   function onAnnotationChange(shapes) {
     if (!currentSession) return;
-    const idx = frameIndexForTime(els.player.currentTime, currentSession.fps);
-    if (shapes.length) currentSession.annotations[String(idx)] = shapes;
-    else delete currentSession.annotations[String(idx)];
+    if (shapes.length) currentSession.annotations[String(currentFrameIndex)] = shapes;
+    else delete currentSession.annotations[String(currentFrameIndex)];
     scheduleSave();
   }
 
@@ -338,8 +348,12 @@
 
     function onMeta() {
       els.player.removeEventListener('loadedmetadata', onMeta);
-      els.scrubber.max = String(Math.round((els.player.duration || 0) * 1000));
+      currentFrameIndex = 0;
+      els.scrubber.min = '0';
+      els.scrubber.max = String(totalFrames());
+      els.scrubber.value = '0';
       els.timeTotal.textContent = formatTime(els.player.duration || 0);
+      els.timeCurrent.textContent = formatTime(0);
       requestAnimationFrame(() => requestAnimationFrame(syncCanvasSize));
     }
     // Attach before assigning src: a fresh recording's blob can report
@@ -431,20 +445,42 @@
     els.btnPlay.innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
   }
 
+  // Seeks to an exact frame index and makes it the new authoritative
+  // position — annotation lookups always use this, never a value
+  // re-derived from currentTime after the seek settles.
+  function seekToFrame(idx) {
+    currentFrameIndex = Math.min(Math.max(idx, 0), totalFrames());
+    els.player.currentTime = currentFrameIndex / currentFps();
+  }
+
   els.player.addEventListener('play', () => setPlayIcon(true));
   els.player.addEventListener('pause', () => {
     setPlayIcon(false);
+    const fps = currentFps();
+    const expected = currentFrameIndex / fps;
+    // If currentTime is still essentially where we last set it via
+    // seekToFrame, trust currentFrameIndex as-is. Only re-derive it from
+    // currentTime when it has drifted meaningfully away from that — i.e.
+    // real playback actually happened since the last controlled seek.
+    if (Math.abs(els.player.currentTime - expected) > 0.5 / fps) {
+      currentFrameIndex = Math.min(Math.round(els.player.currentTime * fps), totalFrames());
+    }
+    els.scrubber.value = String(currentFrameIndex);
     loadAnnotationsForCurrentFrame();
   });
   els.player.addEventListener('seeked', () => {
-    els.scrubber.value = String(Math.round(els.player.currentTime * 1000));
     els.timeCurrent.textContent = formatTime(els.player.currentTime);
-    if (els.player.paused) loadAnnotationsForCurrentFrame();
+    if (els.player.paused) {
+      els.scrubber.value = String(currentFrameIndex);
+      loadAnnotationsForCurrentFrame();
+    }
   });
   els.player.addEventListener('timeupdate', () => {
     if (!els.player.seeking) {
-      els.scrubber.value = String(Math.round(els.player.currentTime * 1000));
       els.timeCurrent.textContent = formatTime(els.player.currentTime);
+      if (!els.player.paused) {
+        els.scrubber.value = String(Math.round(els.player.currentTime * currentFps()));
+      }
     }
   });
 
@@ -455,17 +491,24 @@
 
   function stepFrame(direction) {
     els.player.pause();
-    const fps = Number(els.fpsSelect.value) || 30;
-    const step = 1 / fps;
-    const next = Math.min(Math.max(els.player.currentTime + direction * step, 0), els.player.duration || 0);
-    els.player.currentTime = next;
+    seekToFrame(currentFrameIndex + direction);
   }
   els.btnStepBack.addEventListener('click', () => stepFrame(-1));
   els.btnStepFwd.addEventListener('click', () => stepFrame(1));
 
   els.scrubber.addEventListener('input', () => {
     els.player.pause();
-    els.player.currentTime = Number(els.scrubber.value) / 1000;
+    seekToFrame(Number(els.scrubber.value));
+  });
+
+  // Drawing should always happen on a genuinely settled frame. Pausing on
+  // pointerdown (before any coordinates are captured) stops the video
+  // right away so the frame can't drift between when a shape is started
+  // and when it's finished — previously, drawing during playback (or
+  // right as playback was stopping) could store the shape a frame or two
+  // away from where it visually appeared.
+  els.overlay.addEventListener('pointerdown', () => {
+    if (!els.player.paused) els.player.pause();
   });
 
   els.speedSelect.addEventListener('change', () => {
@@ -474,7 +517,12 @@
 
   els.fpsSelect.addEventListener('change', () => {
     if (!currentSession) return;
-    currentSession.fps = Number(els.fpsSelect.value);
+    currentSession.fps = currentFps();
+    // Re-grid the current position onto the new fps rather than leaving
+    // currentFrameIndex meaning a different instant than what's on screen.
+    currentFrameIndex = Math.min(Math.round(els.player.currentTime * currentFps()), totalFrames());
+    els.scrubber.max = String(totalFrames());
+    els.scrubber.value = String(currentFrameIndex);
     scheduleSave();
     loadAnnotationsForCurrentFrame();
   });
